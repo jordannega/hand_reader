@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>✋ Hand Sign Reader</title>
+<style>
+  * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100vh;
+    background: radial-gradient(circle at 50% 0%, #1a2540 0%, #0a0e18 60%);
+    color: #eef4ff;
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 18px; padding: 24px;
+  }
+  h1 {
+    margin: 0; font-weight: 600; font-size: 1.8rem; letter-spacing: 2px;
+    background: linear-gradient(90deg, #7aa9ff, #b3e0ff, #7aa9ff);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .stage {
+    position: relative;
+    width: min(640px, 92vw);
+    aspect-ratio: 4 / 3;
+    border-radius: 24px;
+    overflow: hidden;
+    background: #050810;
+    box-shadow: 0 25px 60px rgba(0,0,0,0.75), 0 0 0 1px rgba(120,160,255,0.25),
+                0 0 60px rgba(60,110,255,0.15);
+    transition: box-shadow 0.25s;
+  }
+  .stage.active {
+    box-shadow: 0 25px 60px rgba(0,0,0,0.75), 0 0 0 2px #4c8bff,
+                0 0 80px rgba(60,110,255,0.5);
+  }
+  .stage video, .stage canvas {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%; object-fit: cover;
+    transform: scaleX(-1);
+  }
+  .stage canvas { pointer-events: none; }
+  .overlay-msg {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    color: #9bb5d9; font-size: 1.1rem; text-align: center;
+    padding: 20px; line-height: 1.6;
+    background: rgba(5,8,16,0.85);
+    backdrop-filter: blur(6px);
+    transition: opacity 0.3s;
+  }
+  .overlay-msg.hidden { opacity: 0; pointer-events: none; }
+  .overlay-msg .err { color: #ff8a8a; font-weight: 600; }
+  .digit {
+    font-size: clamp(5rem, 18vw, 9rem);
+    font-weight: 900; line-height: 1;
+    min-height: 1.1em; text-align: center;
+    color: #fff; letter-spacing: 4px;
+    text-shadow: 0 0 20px #3f7eff, 0 0 60px #003cff, 0 0 100px #003cff;
+    transition: transform 0.15s;
+  }
+  .digit.pop { transform: scale(1.08); }
+  .status {
+    display: flex; gap: 12px; flex-wrap: wrap; justify-content: center;
+    background: rgba(26,33,48,0.9); padding: 10px 20px;
+    border-radius: 60px; border: 1px solid #2e3b52;
+    backdrop-filter: blur(8px);
+  }
+  .badge {
+    background: #2e3f5e; padding: 6px 16px; border-radius: 40px;
+    color: #c6ddff; font-size: 0.95rem;
+    display: flex; gap: 8px; align-items: center;
+  }
+  .badge span {
+    color: #fff; font-weight: 800; background: #3d5a8a;
+    padding: 2px 12px; border-radius: 30px; min-width: 30px; text-align: center;
+  }
+  button {
+    background: linear-gradient(180deg, #3b62a0, #2d4c82);
+    border: 1px solid #5580c0; color: #fff;
+    font-size: 1.05rem; font-weight: 700; letter-spacing: 1px;
+    padding: 14px 40px; border-radius: 50px; cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.2s;
+    box-shadow: 0 8px 20px rgba(0,60,180,0.5);
+  }
+  button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 12px 26px rgba(0,80,220,0.6); }
+  button:disabled { opacity: 0.55; pointer-events: none; }
+  .hint { color: #7a90ad; font-size: 0.85rem; text-align: center; max-width: 560px; }
+  .hint kbd {
+    background: #222e42; border-radius: 6px; padding: 2px 8px;
+    color: #b7d0ff; font-weight: 700; font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<h1>✋ HAND SIGN READER</h1>
+
+<div class="stage" id="stage">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div class="overlay-msg" id="overlay">
+    Click <b>START CAMERA</b> below to begin
+  </div>
+</div>
+
+<div class="digit" id="digit">—</div>
+
+<div class="status">
+  <div class="badge">🖐️ fingers <span id="fingerCount">0</span></div>
+  <div class="badge">🔢 number <span id="detectedNumber">—</span></div>
+  <div class="badge">⚙️ status <span id="statusText">idle</span></div>
+</div>
+
+<button id="startBtn">▶ START CAMERA</button>
+
+<div class="hint">
+  <kbd>1</kbd> index · <kbd>2</kbd> index+middle · <kbd>3</kbd> thumb+index+middle ·
+  <kbd>4</kbd> four fingers · <kbd>5</kbd> open palm
+</div>
+
+<script type="module">
+/* =========================================================
+   GODTIER HAND SIGN READER
+   Uses @mediapipe/tasks-vision (the current, working API)
+   ========================================================= */
+
+const video        = document.getElementById('video');
+const canvas       = document.getElementById('canvas');
+const ctx          = canvas.getContext('2d');
+const digitEl      = document.getElementById('digit');
+const fingerCountEl= document.getElementById('fingerCount');
+const detectedEl   = document.getElementById('detectedNumber');
+const statusEl     = document.getElementById('statusText');
+const startBtn     = document.getElementById('startBtn');
+const stage        = document.getElementById('stage');
+const overlay      = document.getElementById('overlay');
+
+let landmarker   = null;
+let stream       = null;
+let running      = false;
+let rafId        = null;
+let lastVideoT   = -1;
+let lastNumber   = null;
+
+/* ---------- Load the HandLandmarker model ---------- */
+async function loadModel() {
+  statusEl.textContent = 'loading model…';
+  const vision = await import(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
+  );
+  const fileset = await vision.FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+  );
+  landmarker = await vision.HandLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath:
+        'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate: 'GPU'
+    },
+    runningMode: 'VIDEO',
+    numHands: 1,
+    minHandDetectionConfidence: 0.5,
+    minHandPresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5
+  });
+  statusEl.textContent = 'model ready';
+}
+
+/* ---------- Finger counting ---------- */
+function analyzeHand(lm) {
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const wrist = lm[0];
+
+  // fingers: [tip, pip]
+  const idxExt  = dist(lm[8],  wrist) > dist(lm[6],  wrist) * 1.05;
+  const midExt  = dist(lm[12], wrist) > dist(lm[10], wrist) * 1.05;
+  const rngExt  = dist(lm[16], wrist) > dist(lm[14], wrist) * 1.05;
+  const pnkExt  = dist(lm[20], wrist) > dist(lm[18], wrist) * 1.05;
+
+  // thumb: extended if tip is far from index-MCP relative to IP
+  const thumbExt = dist(lm[4], lm[5]) > dist(lm[3], lm[5]) * 1.1;
+
+  const fingers = { thumb: thumbExt, index: idxExt, middle: midExt,
+                    ring: rngExt, pinky: pnkExt };
+  const count = Object.values(fingers).filter(Boolean).length;
+  return { count, fingers };
+}
+
+/* ---------- Draw skeleton on canvas ---------- */
+function drawSkeleton(lm) {
+  const connections = [
+    [0,1],[1,2],[2,3],[3,4],
+    [0,5],[5,6],[6,7],[7,8],
+    [5,9],[9,10],[10,11],[11,12],
+    [9,13],[13,14],[14,15],[15,16],
+    [13,17],[17,18],[18,19],[19,20],
+    [0,17]
+  ];
+
+  // lines
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#4c8bff';
+  ctx.shadowColor = '#4c8bff';
+  ctx.shadowBlur = 8;
+  for (const [i, j] of connections) {
+    ctx.beginPath();
+    ctx.moveTo(lm[i].x * canvas.width, lm[i].y * canvas.height);
+    ctx.lineTo(lm[j].x * canvas.width, lm[j].y * canvas.height);
+    ctx.stroke();
+  }
+
+  // points
+  ctx.shadowBlur = 12;
+  for (let i = 0; i < lm.length; i++) {
+    const isTip = [4,8,12,16,20].includes(i);
+    ctx.beginPath();
+    ctx.arc(lm[i].x * canvas.width, lm[i].y * canvas.height,
+            isTip ? 7 : 4, 0, Math.PI * 2);
+    ctx.fillStyle = isTip ? '#ffd966' : '#ff9f4b';
+    ctx.shadowColor = isTip ? '#ffd966' : '#ff9f4b';
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+}
+
+/* ---------- Set the number display ---------- */
+function setNumber(n) {
+  if (n === lastNumber) return;
+  lastNumber = n;
+
+  const text = (n === null) ? '—' : String(n);
+  digitEl.textContent = text;
+  detectedEl.textContent = (n === null) ? '—' : String(n);
+
+  digitEl.classList.add('pop');
+  setTimeout(() => digitEl.classList.remove('pop'), 150);
+}
+
+/* ---------- Main loop ---------- */
+function loop() {
+  if (!running) return;
+
+  if (video.readyState >= 2 && video.currentTime !== lastVideoT) {
+    lastVideoT = video.currentTime;
+
+    let results;
+    try {
+      results = landmarker.detectForVideo(video, performance.now());
+    } catch (e) {
+      console.error('detect error', e);
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
+
+    // Clear canvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (results.landmarks && results.landmarks.length > 0) {
+      const lm = results.landmarks[0];
+      drawSkeleton(lm);
+
+      const { count, fingers } = analyzeHand(lm);
+
+      fingerCountEl.textContent = count;
+
+      // Only report 1-5 as numbers (0 = fist, we show —)
+      if (count >= 1 && count <= 5) {
+        setNumber(count);
+      } else {
+        setNumber(null);
+      }
+
+      // Debug-friendly: log which fingers detected
+      statusEl.textContent =
+        ['thumb','index','middle','ring','pinky']
+          .filter(f => fingers[f]).join('+') || 'fist';
+    } else {
+      fingerCountEl.textContent = '0';
+      setNumber(null);
+      statusEl.textContent = 'no hand';
+    }
+  }
+
+  rafId = requestAnimationFrame(loop);
+}
+
+/* ---------- Start camera ---------- */
+async function start() {
+  startBtn.disabled = true;
+  startBtn.textContent = '⏳ Loading…';
+  overlay.classList.remove('hidden');
+  overlay.innerHTML = 'Loading AI model… (first time only, ~3 seconds)';
+
+  try {
+    // 1) Load model
+    if (!landmarker) {
+      await loadModel();
+    }
+
+    // 2) Get camera
+    overlay.innerHTML = 'Requesting camera permission…';
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+        facingMode: 'user'
+      },
+      audio: false
+    });
+
+    video.srcObject = stream;
+
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('video timeout')), 8000);
+      video.onloadedmetadata = () => { clearTimeout(t); resolve(); };
+    });
+
+    await video.play();
+
+    // 3) Go
+    running = true;
+    stage.classList.add('active');
+    overlay.classList.add('hidden');
+    startBtn.textContent = '● RUNNING';
+    statusEl.textContent = 'detecting…';
+    loop();
+
+  } catch (err) {
+    console.error(err);
+    running = false;
+    startBtn.disabled = false;
+    startBtn.textContent = '▶ RETRY';
+    overlay.classList.remove('hidden');
+    overlay.innerHTML =
+      `<div><div class="err">⚠ ${err.name || 'Error'}</div>
+       <div style="margin-top:8px;font-size:0.9rem">${err.message}</div>
+       <div style="margin-top:12px;font-size:0.8rem;color:#7a90ad">
+         If on <b>file://</b>, open via a local server (see below) or use Chrome with
+         <code>--allow-file-access-from-files</code>.
+       </div></div>`;
+    statusEl.textContent = 'error';
+  }
+}
+
+startBtn.addEventListener('click', start);
+
+window.addEventListener('beforeunload', () => {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+});
+</script>
+
+</body>
+</html>
